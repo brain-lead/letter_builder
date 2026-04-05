@@ -47,11 +47,19 @@ jobs:
       - name: Create Windows package
         shell: bash
         run: |
-          mkdir -p LetterBuilder/app/.next
-          cp -r .next/standalone/* LetterBuilder/app/
-          cp -r .next/static LetterBuilder/app/.next/static
-          mkdir -p LetterBuilder/app/public
-          cp -r public/* LetterBuilder/app/public/ 2>/dev/null || true
+          # Copy the ENTIRE standalone directory as-is
+          cp -r .next/standalone LetterBuilder-app
+          
+          # Add static files (not included in standalone by default)
+          cp -r .next/static LetterBuilder-app/.next/static
+          
+          # Add public files
+          mkdir -p LetterBuilder-app/public
+          cp -r public/* LetterBuilder-app/public/ 2>/dev/null || true
+          
+          # Create final structure
+          mkdir -p LetterBuilder
+          mv LetterBuilder-app LetterBuilder/app
 
           # Download Node.js portable
           curl -L -o node.zip "https://nodejs.org/dist/v20.18.1/node-v20.18.1-win-x64.zip"
