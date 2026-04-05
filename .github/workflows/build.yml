@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-standalone:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,11 +17,54 @@ jobs:
       - run: npm run build
       - name: Package standalone
         run: |
-          cp -r .next/standalone ./package
-          cp -r .next/static ./package/.next/static
-          cp -r public ./package/public 2>/dev/null || true
-          cd package && tar -czf ../letter-builder.tar.gz .
+          mkdir -p package
+          cp -r .next/standalone/* package/
+          cp -r .next/static package/.next/static
+          mkdir -p package/public
+          cp -r public/* package/public/ 2>/dev/null || true
+          cd package && tar -czf ../letter-builder-standalone.tar.gz .
       - uses: actions/upload-artifact@v4
         with:
-          name: letter-builder
-          path: letter-builder.tar.gz
+          name: letter-builder-standalone
+          path: letter-builder-standalone.tar.gz
+
+  build-windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run build
+      - name: Create launcher
+        shell: bash
+        run: |
+          cat > launcher.js << 'EOF'
+          const { execSync } = require('child_process');
+          const path = require('path');
+          const http = require('http');
+          process.env.PORT = '3847';
+          process.env.HOSTNAME = '127.0.0.1';
+          process.env.NODE_ENV = 'production';
+          const serverPath = path.join(__dirname, '.next', 'standalone', 'server.js');
+          console.log('Starting Letter Builder on http://127.0.0.1:3847');
+          console.log('Opening browser...');
+          setTimeout(() => {
+            try { execSync('start http://127.0.0.1:3847', { stdio: 'ignore' }); } catch {}
+          }, 2000);
+          require(serverPath);
+          EOF
+      - name: Install pkg and build exe
+        run: |
+          npm install -g pkg
+          Copy-Item -Recurse .next\standalone\* . -Force
+          Copy-Item -Recurse .next\static .next\static -Force
+          mkdir -Force public | Out-Null
+          Copy-Item -Recurse public\* public\ -Force -ErrorAction SilentlyContinue
+          pkg launcher.js --targets node20-win-x64 --output letter-builder.exe --compress GZip
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: letter-builder-windows-exe
+          path: letter-builder.exe
