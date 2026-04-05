@@ -1,0 +1,27 @@
+name: Build & Package
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run build
+      - name: Package standalone
+        run: |
+          cp -r .next/standalone ./package
+          cp -r .next/static ./package/.next/static
+          cp -r public ./package/public 2>/dev/null || true
+          cd package && tar -czf ../letter-builder.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: letter-builder
+          path: letter-builder.tar.gz
