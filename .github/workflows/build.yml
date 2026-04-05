@@ -37,28 +37,53 @@ jobs:
           node-version: 20
       - run: npm ci
       - run: npm run build
-      - name: Create launcher
+
+      - name: Prepare and build exe
         shell: bash
         run: |
-          cat > launcher.js << 'EOF'
+          # Create staging directory
+          mkdir -p staging/.next
+
+          # Copy standalone server files
+          cp -r .next/standalone/* staging/
+
+          # Copy static assets
+          cp -r .next/static staging/.next/static
+
+          # Copy public
+          mkdir -p staging/public
+          cp -r public/* staging/public/ 2>/dev/null || true
+
+          # Create launcher
+          cat > staging/launcher.js << 'LAUNCHER'
           const path = require('path');
           const { exec } = require('child_process');
           process.env.PORT = '3847';
           process.env.HOSTNAME = '127.0.0.1';
           process.env.NODE_ENV = 'production';
-          console.log('Letter Builder starting on http://127.0.0.1:3847');
-          setTimeout(() => { exec('start http://127.0.0.1:3847'); }, 2500);
+          console.log('');
+          console.log('  Letter Builder by Brain Lead');
+          console.log('  http://127.0.0.1:3847');
+          console.log('');
+          console.log('  Do not close this window while using Letter Builder.');
+          console.log('');
+          setTimeout(() => {
+            try { exec('start http://127.0.0.1:3847'); } catch(e) {}
+          }, 3000);
           require(path.join(__dirname, 'server.js'));
-          EOF
-      - name: Build exe
-        run: |
+          LAUNCHER
+
+          # Install pkg
           npm install -g @yao-pkg/pkg
-          xcopy /E /I /Y .next\standalone\* . >nul 2>&1
-          xcopy /E /I /Y .next\static .next\static >nul 2>&1
-          if not exist public mkdir public
-          xcopy /E /I /Y public public >nul 2>&1
-          pkg launcher.js --targets node20-win-x64 --output letter-builder.exe --compress GZip
-        shell: cmd
+
+          # Build exe from staging directory
+          cd staging
+          pkg launcher.js --targets node20-win-x64 --output ../letter-builder.exe --compress GZip
+
+          # Verify
+          cd ..
+          ls -la letter-builder.exe
+
       - uses: actions/upload-artifact@v4
         with:
           name: letter-builder-windows-exe
