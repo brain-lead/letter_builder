@@ -1,0 +1,13 @@
+export const APP_NAME = 'Letter_Builder'
+export const APP_VERSION = '1.0'
+export const APP_ID = 'Letter Builder'
+export const DEVELOPER = 'iampopg'
+export const DEVELOPER_TELEGRAM = '@brain_lead'
+export const BACKEND_URL = 'https://impopgbot.pythonanywhere.com'
+export const HWID_ENDPOINT = `${BACKEND_URL}/check-hwid`
+export const DEFAULT_USERNAME = 'license_trial_letter_builder'
+export const LICENSE_PREFIX = 'licence_braintools'
+export const BUILD_DATE = '2026-04-03'
+export const RELEASE_TYPE = 'Stable'
+export const BUY_LICENSE_URL = 'https://brainlead.pythonanywhere.com/checkout?product=1'
+export const ENCRYPTION_KEY = 'iampopg_decrytion_secure_key_v1'
