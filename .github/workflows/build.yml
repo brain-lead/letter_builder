@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: 20
       - run: npm ci
       - run: npm run build
       - name: Create launcher
@@ -52,12 +52,12 @@ jobs:
           EOF
       - name: Build exe
         run: |
-          npm install -g pkg
+          npm install -g @yao-pkg/pkg
           xcopy /E /I /Y .next\standalone\* . >nul 2>&1
           xcopy /E /I /Y .next\static .next\static >nul 2>&1
           if not exist public mkdir public
           xcopy /E /I /Y public public >nul 2>&1
-          pkg launcher.js --targets node18-win-x64 --output letter-builder.exe --compress GZip
+          pkg launcher.js --targets node20-win-x64 --output letter-builder.exe --compress GZip
         shell: cmd
       - uses: actions/upload-artifact@v4
         with:
