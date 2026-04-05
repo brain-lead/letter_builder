@@ -47,45 +47,88 @@ jobs:
       - name: Create Windows package
         shell: bash
         run: |
-          # Create package directory
           mkdir -p LetterBuilder/app/.next
-
-          # Copy standalone server
           cp -r .next/standalone/* LetterBuilder/app/
           cp -r .next/static LetterBuilder/app/.next/static
           mkdir -p LetterBuilder/app/public
           cp -r public/* LetterBuilder/app/public/ 2>/dev/null || true
 
-          # Download Node.js portable for Windows
+          # Download Node.js portable
           curl -L -o node.zip "https://nodejs.org/dist/v20.18.1/node-v20.18.1-win-x64.zip"
           unzip -q node.zip
           mv node-v20.18.1-win-x64 LetterBuilder/node
 
-          # Create launcher bat
-          cat > LetterBuilder/LetterBuilder.bat << 'BAT'
-          @echo off
-          title Letter Builder by Brain Lead
-          echo.
-          echo   Letter Builder by Brain Lead
-          echo   Starting server...
-          echo.
-          set PORT=3847
-          set HOSTNAME=127.0.0.1
-          set NODE_ENV=production
-          start "" "http://127.0.0.1:3847"
-          "%~dp0node\node.exe" "%~dp0app\server.js"
-          BAT
+      - name: Create exe launcher
+        shell: pwsh
+        run: |
+          $code = @'
+          using System;
+          using System.Diagnostics;
+          using System.IO;
+          using System.Threading;
 
-          # Create README
-          cat > LetterBuilder/README.txt << 'README'
-          Letter Builder by Brain Lead
-          ============================
+          class Program {
+              static void Main() {
+                  string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                  string nodeExe = Path.Combine(baseDir, "node", "node.exe");
+                  string serverJs = Path.Combine(baseDir, "app", "server.js");
 
-          Double-click LetterBuilder.bat to start.
-          Opens in your browser at http://127.0.0.1:3847
+                  if (!File.Exists(nodeExe)) {
+                      Console.WriteLine("ERROR: node/node.exe not found. Make sure the node folder is next to LetterBuilder.exe");
+                      Console.ReadKey();
+                      return;
+                  }
+                  if (!File.Exists(serverJs)) {
+                      Console.WriteLine("ERROR: app/server.js not found. Make sure the app folder is next to LetterBuilder.exe");
+                      Console.ReadKey();
+                      return;
+                  }
 
-          Do not close the command window while using.
-          README
+                  Console.Title = "Letter Builder by Brain Lead";
+                  Console.WriteLine("");
+                  Console.WriteLine("  ╔══════════════════════════════════════╗");
+                  Console.WriteLine("  ║     Letter Builder by Brain Lead     ║");
+                  Console.WriteLine("  ║     http://127.0.0.1:3847           ║");
+                  Console.WriteLine("  ╚══════════════════════════════════════╝");
+                  Console.WriteLine("");
+                  Console.WriteLine("  Starting server...");
+                  Console.WriteLine("  Do NOT close this window.");
+                  Console.WriteLine("");
+
+                  var psi = new ProcessStartInfo {
+                      FileName = nodeExe,
+                      Arguments = "\"" + serverJs + "\"",
+                      WorkingDirectory = Path.Combine(baseDir, "app"),
+                      UseShellExecute = false,
+                      RedirectStandardOutput = true,
+                      RedirectStandardError = true,
+                      CreateNoWindow = false
+                  };
+                  psi.EnvironmentVariables["PORT"] = "3847";
+                  psi.EnvironmentVariables["HOSTNAME"] = "127.0.0.1";
+                  psi.EnvironmentVariables["NODE_ENV"] = "production";
+
+                  var proc = Process.Start(psi);
+
+                  // Open browser after 3 seconds
+                  new Thread(() => {
+                      Thread.Sleep(3000);
+                      try { Process.Start(new ProcessStartInfo("http://127.0.0.1:3847") { UseShellExecute = true }); } catch {}
+                      Console.WriteLine("  Browser opened. Ready!");
+                  }).Start();
+
+                  // Pipe output
+                  new Thread(() => { string line; while ((line = proc.StandardOutput.ReadLine()) != null) Console.WriteLine("  " + line); }).Start();
+                  new Thread(() => { string line; while ((line = proc.StandardError.ReadLine()) != null) Console.WriteLine("  " + line); }).Start();
+
+                  proc.WaitForExit();
+              }
+          }
+          '@
+
+          $code | Out-File -Encoding utf8 LetterBuilder\Launcher.cs
+          & "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /target:exe /out:LetterBuilder\LetterBuilder.exe LetterBuilder\Launcher.cs
+          Remove-Item LetterBuilder\Launcher.cs
 
       - name: Zip package
         shell: pwsh
