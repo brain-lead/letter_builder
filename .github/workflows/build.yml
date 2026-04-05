@@ -59,9 +59,8 @@ jobs:
         run: |
           npm install -g pkg
           Copy-Item -Recurse .next\standalone\* . -Force
-          Copy-Item -Recurse .next\static .next\static -Force
+          if (!(Test-Path .next\standalone\.next\static)) { Write-Host 'No static to copy' } else { Copy-Item -Recurse .next\standalone\.next\static .next\static -Force }
           mkdir -Force public | Out-Null
-          Copy-Item -Recurse public\* public\ -Force -ErrorAction SilentlyContinue
           pkg launcher.js --targets node20-win-x64 --output letter-builder.exe --compress GZip
         shell: pwsh
       - uses: actions/upload-artifact@v4
