@@ -15,6 +15,8 @@ jobs:
           node-version: 20
       - run: npm ci
       - run: npm run build
+      - name: Obfuscate server code
+        run: node obfuscate.js
       - name: Package standalone
         run: |
           mkdir -p package/.next
@@ -37,6 +39,10 @@ jobs:
           node-version: 20
       - run: npm ci
       - run: npm run build
+
+      - name: Obfuscate server code
+        shell: bash
+        run: node obfuscate.js
 
       - name: Create Windows package
         shell: bash
