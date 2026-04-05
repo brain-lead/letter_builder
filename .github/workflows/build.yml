@@ -28,7 +28,7 @@ jobs:
           name: letter-builder-standalone
           path: letter-builder-standalone.tar.gz
 
-  build-windows-exe:
+  build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,53 +38,54 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-      - name: Prepare and build exe
+      - name: Create Windows package
         shell: bash
         run: |
-          # Create staging directory
-          mkdir -p staging/.next
+          # Create package directory
+          mkdir -p LetterBuilder/app/.next
 
-          # Copy standalone server files
-          cp -r .next/standalone/* staging/
+          # Copy standalone server
+          cp -r .next/standalone/* LetterBuilder/app/
+          cp -r .next/static LetterBuilder/app/.next/static
+          mkdir -p LetterBuilder/app/public
+          cp -r public/* LetterBuilder/app/public/ 2>/dev/null || true
 
-          # Copy static assets
-          cp -r .next/static staging/.next/static
+          # Download Node.js portable for Windows
+          curl -L -o node.zip "https://nodejs.org/dist/v20.18.1/node-v20.18.1-win-x64.zip"
+          unzip -q node.zip
+          mv node-v20.18.1-win-x64 LetterBuilder/node
 
-          # Copy public
-          mkdir -p staging/public
-          cp -r public/* staging/public/ 2>/dev/null || true
+          # Create launcher bat
+          cat > LetterBuilder/LetterBuilder.bat << 'BAT'
+          @echo off
+          title Letter Builder by Brain Lead
+          echo.
+          echo   Letter Builder by Brain Lead
+          echo   Starting server...
+          echo.
+          set PORT=3847
+          set HOSTNAME=127.0.0.1
+          set NODE_ENV=production
+          start "" "http://127.0.0.1:3847"
+          "%~dp0node\node.exe" "%~dp0app\server.js"
+          BAT
 
-          # Create launcher
-          cat > staging/launcher.js << 'LAUNCHER'
-          const path = require('path');
-          const { exec } = require('child_process');
-          process.env.PORT = '3847';
-          process.env.HOSTNAME = '127.0.0.1';
-          process.env.NODE_ENV = 'production';
-          console.log('');
-          console.log('  Letter Builder by Brain Lead');
-          console.log('  http://127.0.0.1:3847');
-          console.log('');
-          console.log('  Do not close this window while using Letter Builder.');
-          console.log('');
-          setTimeout(() => {
-            try { exec('start http://127.0.0.1:3847'); } catch(e) {}
-          }, 3000);
-          require(path.join(__dirname, 'server.js'));
-          LAUNCHER
+          # Create README
+          cat > LetterBuilder/README.txt << 'README'
+          Letter Builder by Brain Lead
+          ============================
 
-          # Install pkg
-          npm install -g @yao-pkg/pkg
+          Double-click LetterBuilder.bat to start.
+          Opens in your browser at http://127.0.0.1:3847
 
-          # Build exe from staging directory
-          cd staging
-          pkg launcher.js --targets node20-win-x64 --output ../letter-builder.exe --compress GZip
+          Do not close the command window while using.
+          README
 
-          # Verify
-          cd ..
-          ls -la letter-builder.exe
+      - name: Zip package
+        shell: pwsh
+        run: Compress-Archive -Path LetterBuilder -DestinationPath LetterBuilder-Windows.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: letter-builder-windows-exe
-          path: letter-builder.exe
+          name: LetterBuilder-Windows
+          path: LetterBuilder-Windows.zip
