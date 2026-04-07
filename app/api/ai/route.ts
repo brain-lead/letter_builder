@@ -298,24 +298,102 @@ export async function POST(req: NextRequest) {
     }
 
     // ============================================
-    // CASE 3: Text edit on existing HTML
+    // CASE 3: Smart edit — AI outputs JSON instruction, code applies it
     // ============================================
     if (htmlParts) {
-      const { content, footer } = splitBodyAndFooter(htmlParts.body)
-      const contentBudget = budget.availableForInput - estimateTokens(prompt || '') - estimateTokens(historyText) - 300
-      const trimmed = trimHtmlToFit(content, contentBudget)
+      // Direct hex replacement (no AI needed)
+      const hexReplaceMatch = prompt?.match(/(#[0-9a-fA-F]{6})\s+to\s+(#[0-9a-fA-F]{6})/i)
+      if (hexReplaceMatch) {
+        const newHtml = currentHtml.replace(new RegExp(hexReplaceMatch[1], 'gi'), hexReplaceMatch[2])
+        return NextResponse.json({ html: newHtml })
+      }
 
-      let editPrompt = ''
-      if (historyText) editPrompt += `Recent chat:\n${historyText}\n\n`
-      editPrompt += `HTML content:\n\n${trimmed}\n\nDO: ${prompt}\n\nKeep all structure/styles. Only change what I asked. Output complete HTML.`
+      // AI understands the request and outputs a JSON instruction
+      // This is MUCH smaller than sending the full HTML — just the instruction
+      const SMART_EDIT_SYSTEM = `You are an HTML email editor assistant. The user wants to make a change to their email.
+Analyze the request and output ONLY a JSON object describing what to change.
+Output format:
+{"action": "change_color", "target": "button|header|background|text", "value": "#hexcolor"}
+or
+{"action": "replace_text", "find": "exact text to find", "replace": "new text"}
+or
+{"action": "change_button_text", "value": "new button text"}
+or
+{"action": "unknown", "message": "explain what you cannot do"}
 
-      let result = await callAI(provider, model, apiKey, EDIT_SYSTEM, editPrompt)
-      const fullDoc = result.match(/(<!DOCTYPE[\s\S]*<\/html>)/i)
-      if (fullDoc) return NextResponse.json({ html: fullDoc[1] })
+For colors, always output a valid hex color code.
+Output ONLY the JSON object, nothing else.`
 
-      result = cleanAIOutput(result)
-      const html = htmlParts.beforeBody + result + footer + htmlParts.afterBody
-      return NextResponse.json({ html })
+      let instruction: any = null
+      try {
+        const aiResponse = await callAI(provider, model, apiKey, SMART_EDIT_SYSTEM, `User request: ${prompt}`)
+        const jsonMatch = aiResponse.match(/\{[\s\S]*\}/)
+        if (jsonMatch) instruction = JSON.parse(jsonMatch[0])
+      } catch {}
+
+      if (instruction && instruction.action !== 'unknown') {
+        let newHtml = currentHtml
+        let changed = false
+        let description = ''
+
+        if (instruction.action === 'change_color' && instruction.value) {
+          const hex = instruction.value
+          const target = (instruction.target || '').toLowerCase()
+          if (target.includes('button') || target.includes('cta')) {
+            newHtml = newHtml.replace(
+              /(<td\s[^>]*bgcolor=")([^"]+)("[^>]*>[\s\S]{0,500}?<a[^>]*padding[^>]*>)/gi,
+              ((_m: string, p1: string, _old: string, p2: string) => { changed = true; return p1 + hex + p2 })
+            )
+            description = `Button color changed to ${hex}`
+          } else if (target.includes('header') || target.includes('banner') || target.includes('top')) {
+            let count = 0
+            newHtml = newHtml.replace(/bgcolor="(#[0-9a-fA-F]{3,6})"/gi, (_m: string, c: string) => {
+              if (count === 0 && c.toLowerCase() !== '#edf0f2' && c.toLowerCase() !== '#ffffff') {
+                count++; changed = true; return `bgcolor="${hex}"`
+              }
+              return _m
+            });
+            description = `Header color changed to ${hex}`
+          } else if (target.includes('background') || target.includes('bg') || target.includes('body')) {
+            newHtml = newHtml
+              .replace(/bgcolor="#EDF0F2"/gi, () => { changed = true; return `bgcolor="${hex}"` })
+              .replace(/background-color:\s*#EDF0F2/gi, () => { changed = true; return `background-color: ${hex}` })
+            description = `Background changed to ${hex}`
+          } else {
+            // Generic — try all color targets
+            newHtml = newHtml.replace(new RegExp(instruction.value.replace('#', '#'), 'gi'), hex)
+            changed = true
+            description = `Color changed to ${hex}`
+          }
+        } else if (instruction.action === 'replace_text' && instruction.find && instruction.replace !== undefined) {
+          if (newHtml.includes(instruction.find)) {
+            newHtml = newHtml.split(instruction.find).join(instruction.replace)
+            changed = true
+            description = `Replaced "${instruction.find}" with "${instruction.replace}"`
+          } else {
+            const regex = new RegExp(instruction.find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
+            newHtml = newHtml.replace(regex, instruction.replace)
+            changed = newHtml !== currentHtml
+            description = changed ? `Replaced "${instruction.find}" with "${instruction.replace}"` : `"${instruction.find}" not found`
+          }
+        } else if (instruction.action === 'change_button_text' && instruction.value) {
+          newHtml = newHtml.replace(
+            /(<a[^>]*style="[^"]*padding:\s*12px[^"]*text-decoration:\s*none[^"]*"[^>]*>)([\s\S]*?)(<\/a>)/gi,
+            ((_m: string, open: string, _old: string, close: string) => { changed = true; return open + instruction.value + close })
+          )
+          description = changed ? `Button text changed to "${instruction.value}"` : 'Could not find button'
+        }
+
+        if (changed) {
+          return NextResponse.json({ html: newHtml, editDescription: description })
+        } else {
+          return NextResponse.json({ error: description || 'Could not apply the change. Try using the visual editor.' }, { status: 400 })
+        }
+      }
+
+      // Fallback: AI couldn't parse — return helpful message
+      const msg = instruction?.message || 'Could not understand the request. Try: "change button color to blue" or "replace X with Y"'
+      return NextResponse.json({ error: msg }, { status: 400 })
     }
 
     // ============================================
