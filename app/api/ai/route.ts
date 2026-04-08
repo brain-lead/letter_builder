@@ -342,8 +342,8 @@ Output ONLY the JSON object, nothing else.`
           if (target.includes('button') || target.includes('cta')) {
             newHtml = newHtml.replace(
               /(<td\s[^>]*bgcolor=")([^"]+)("[^>]*>[\s\S]{0,500}?<a[^>]*padding[^>]*>)/gi,
-              ((_m: string, p1: string, _old: string, p2: string) => { changed = true; return p1 + hex + p2 })
-            )
+              (_m: string, p1: string, _old: string, p2: string) => { changed = true; return p1 + hex + p2 })
+
             description = `Button color changed to ${hex}`
           } else if (target.includes('header') || target.includes('banner') || target.includes('top')) {
             let count = 0
@@ -379,8 +379,8 @@ Output ONLY the JSON object, nothing else.`
         } else if (instruction.action === 'change_button_text' && instruction.value) {
           newHtml = newHtml.replace(
             /(<a[^>]*style="[^"]*padding:\s*12px[^"]*text-decoration:\s*none[^"]*"[^>]*>)([\s\S]*?)(<\/a>)/gi,
-            ((_m: string, open: string, _old: string, close: string) => { changed = true; return open + instruction.value + close })
-          )
+            (_m: string, open: string, _old: string, close: string) => { changed = true; return open + instruction.value + close })
+
           description = changed ? `Button text changed to "${instruction.value}"` : 'Could not find button'
         }
 
