@@ -95,7 +95,7 @@ export const useEditorStore = create<Store>((set, get) => ({
   historyIdx: 0,
   aiProvider: 'groq',
   aiModel: 'meta-llama/llama-4-scout-17b-16e-instruct',
-  apiKeys: { groq: '', claude: '' },
+  apiKeys: { groq: '', claude: '', openai: '' },
   isGenerating: false,
   includeHtml: true,
   messages: [],
@@ -136,8 +136,8 @@ export const useEditorStore = create<Store>((set, get) => ({
   canRedo: () => get().historyIdx < get().history.length - 1,
 
   setAiProvider: (aiProvider) => {
-    const model = aiProvider === 'groq' ? 'meta-llama/llama-4-scout-17b-16e-instruct' : 'claude-sonnet-4-6'
-    set({ aiProvider, aiModel: model })
+    const defaults: Record<string, string> = { groq: 'meta-llama/llama-4-scout-17b-16e-instruct', claude: 'claude-sonnet-4-6', openai: 'gpt-4o' }
+    set({ aiProvider, aiModel: defaults[aiProvider] || 'gpt-4o' })
   },
   setAiModel: (aiModel) => set({ aiModel }),
   setApiKey: (provider, key) => set((s) => ({ apiKeys: { ...s.apiKeys, [provider]: key } })),
@@ -156,11 +156,12 @@ export const useEditorStore = create<Store>((set, get) => ({
   loadKeys: () => {
     const groq = localStorage.getItem('apikey_groq') ?? ''
     const claude = localStorage.getItem('apikey_claude') ?? ''
+    const openai = localStorage.getItem('apikey_openai') ?? ''
     const savedHtml = localStorage.getItem('lb_html')
     if (savedHtml) {
-      set({ apiKeys: { groq, claude }, html: savedHtml, history: [savedHtml], historyIdx: 0 })
+      set({ apiKeys: { groq, claude, openai }, html: savedHtml, history: [savedHtml], historyIdx: 0 })
     } else {
-      set({ apiKeys: { groq, claude } })
+      set({ apiKeys: { groq, claude, openai } })
     }
   },
 

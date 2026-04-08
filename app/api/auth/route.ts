@@ -3,11 +3,11 @@ import { APP_VERSION, APP_ID, APP_NAME, BUILD_DATE, RELEASE_TYPE, DEVELOPER, HWI
 
 export async function POST(req: NextRequest) {
   try {
-    const { hwid, licenseKey } = await req.json()
+    const { hwid, licenseKey, computerUsername } = await req.json()
 
     if (!hwid) return NextResponse.json({ error: 'HWID required' }, { status: 400 })
 
-    // Build username
+    // Build username — same format as Python version
     let username = DEFAULT_USERNAME
     if (licenseKey) {
       username = `${LICENSE_PREFIX}_${licenseKey}`
@@ -16,7 +16,7 @@ export async function POST(req: NextRequest) {
     const payload = {
       username,
       hwid,
-      computer_username: 'web_user',
+      computer_username: computerUsername || hwid, // Use HWID as fallback identifier
       app_version: APP_VERSION,
       build_date: BUILD_DATE,
       release_type: RELEASE_TYPE,

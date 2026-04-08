@@ -1,430 +1,194 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { callGroq } from '@/lib/ai/groq'
-import { callClaude } from '@/lib/ai/claude'
-import { estimateTokens, getContextBudget, trimHtmlToFit } from '@/types'
+import { estimateTokens, trimHtmlToFit } from '@/types'
 
-const EDIT_SYSTEM = `You do ONE small find-and-replace edit on HTML.
-RULES:
-1. Output ONLY the edited HTML. No preamble. No markdown.
-2. Make ONLY the ONE change described. Everything else BYTE-FOR-BYTE identical.
-3. Keep ALL structure, styles, colors, bgcolor identical.
-4. Do NOT truncate — output the COMPLETE content.
-5. For questions: plain text only.`
+async function callAI(provider: string, model: string, apiKey: string, system: string, prompt: string, imageBase64?: string): Promise<string> {
+  if (provider === 'groq') return (await import('@/lib/ai/groq')).callGroq(apiKey, model, system, prompt, imageBase64)
+  if (provider === 'claude') return (await import('@/lib/ai/claude')).callClaude(apiKey, model, system, prompt, imageBase64)
+  if (provider === 'openai') return (await import('@/lib/ai/openai')).callOpenAI(apiKey, model, system, prompt, imageBase64)
+  throw new Error('Unknown provider: ' + provider)
+}
 
+// Vision system for Transform feature
 const VISION_SYSTEM = `You read email screenshots. Extract ALL visible text and colors.
-
-Output this EXACT format (fill in values from the image):
-BRAND: [brand/company name]
-HEADER_COLOR: [hex color of the header bar, e.g. #0078D4]
-HEADER_LINK: [text of the top-right link if visible]
+Output this EXACT format:
+BRAND: [brand name]
+HEADER_COLOR: [hex color of header bar]
 BODY:
-[copy every line of body text exactly as shown, one line per line]
+[every line of body text]
 BUTTON: [button text]
 BANNER:
-[copy any banner/notice text below the button]
+[banner/notice text if any]
 SECOND_BODY:
-[copy any text below the button that is NOT the banner, or write EMPTY if none]
+[text below button, or EMPTY]
+Be EXACT. Copy text word for word.`
 
-Be EXACT. Copy text word for word from the image.`
-
-function splitHtml(html: string): { beforeBody: string; body: string; afterBody: string } | null {
-  const bodyOpenMatch = html.match(/<body[^>]*>/i)
-  const bodyCloseIdx = html.lastIndexOf('</body>')
-  if (!bodyOpenMatch || bodyCloseIdx === -1) return null
-  const bodyOpenEnd = html.indexOf(bodyOpenMatch[0]) + bodyOpenMatch[0].length
-  return { beforeBody: html.substring(0, bodyOpenEnd), body: html.substring(bodyOpenEnd, bodyCloseIdx), afterBody: html.substring(bodyCloseIdx) }
+function splitHtml(html: string) {
+  const m = html.match(/<body[^>]*>/i)
+  const ci = html.lastIndexOf('</body>')
+  if (!m || ci === -1) return null
+  const bi = html.indexOf(m[0]) + m[0].length
+  return { before: html.substring(0, bi), body: html.substring(bi, ci), after: html.substring(ci) }
 }
 
-function splitBodyAndFooter(body: string): { content: string; footer: string } {
-  const markers = ['SoFi Bank, N.A.', 'Member FDIC', '© 20', '&copy;', 'unsubscribe', 'privacy policy', 'all rights reserved']
-  const tableStarts: number[] = []
-  let searchFrom = 0
-  while (true) {
-    const idx = body.indexOf('<table', searchFrom)
-    if (idx === -1) break
-    tableStarts.push(idx)
-    let depth = 0, i = idx
-    while (i < body.length) {
-      if (body.substring(i, i + 6).toLowerCase() === '<table') depth++
-      if (body.substring(i, i + 8).toLowerCase() === '</table>') { depth--; if (depth === 0) { searchFrom = i + 8; break } }
-      i++
-    }
-    if (i >= body.length) break
-  }
-  for (let i = tableStarts.length - 1; i >= 0; i--) {
-    const s = tableStarts[i]
-    if (s < body.length * 0.3) break
-    const chunk = body.substring(s, Math.min(s + 2000, body.length)).toLowerCase()
-    const isFooter = markers.some(m => chunk.includes(m.toLowerCase()))
-    if (!isFooter) {
-      if (i + 1 < tableStarts.length) return { content: body.substring(0, tableStarts[i + 1]), footer: body.substring(tableStarts[i + 1]) }
-      break
-    }
-    if (i === 0 || tableStarts[i - 1] < body.length * 0.3) return { content: body.substring(0, s), footer: body.substring(s) }
-  }
-  return { content: body, footer: '' }
-}
-
-function cleanAIOutput(result: string): string {
-  let r = result.replace(/```html?\s*/g, '').replace(/```/g, '')
-  const firstTag = r.search(/<(?:div|table|!--|img|span|a|p|br|td|tr|h[1-6])/i)
-  if (firstTag > 0) r = r.substring(firstTag)
-  r = r.replace(/<\/?body[^>]*>/gi, '').replace(/<\/?html>/gi, '').replace(/<!DOCTYPE[^>]*>/gi, '')
-  const lastClose = r.lastIndexOf('>')
-  if (lastClose > 0) { const after = r.substring(lastClose + 1).trim(); if (after.length > 0 && !after.startsWith('<')) r = r.substring(0, lastClose + 1) }
-  return r
-}
-
-// Parse vision output into structured data
-function parseVisionOutput(plan: string): {
-  brand: string; headerColor: string; headerLink: string;
-  bodyLines: string[]; buttonText: string; bannerText: string; secondBody: string;
-} {
-  // Normalize line endings
-  const p = plan.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-
-  const get = (key: string) => {
-    const m = p.match(new RegExp(`${key}:\s*(.+)`, 'i'))
-    return m?.[1]?.trim() || ''
-  }
-
-  // Extract multi-line block between KEY: and next KEY: or end
-  const getBlock = (key: string) => {
-    const pattern = new RegExp(`${key}:\s*\n([\\s\\S]*?)(?=\n(?:BRAND|HEADER_COLOR|HEADER_LINK|BODY|BUTTON|BANNER|SECOND_BODY):|$)`, 'i')
-    const m = p.match(pattern)
-    if (m) return m[1].trim()
-    // Fallback: try without requiring newline after key
-    const pattern2 = new RegExp(`${key}:[\\s]*([\\s\\S]*?)(?=(?:BRAND|HEADER_COLOR|HEADER_LINK|BODY|BUTTON|BANNER|SECOND_BODY):|$)`, 'i')
-    const m2 = p.match(pattern2)
-    return m2?.[1]?.trim() || ''
-  }
-
-  // More robust: split by known keys
+function parseVision(plan: string) {
+  const p = plan.replace(/\r\n/g, '\n')
   const sections: Record<string, string> = {}
   const keys = ['BRAND', 'HEADER_COLOR', 'HEADER_LINK', 'BODY', 'BUTTON', 'BANNER', 'SECOND_BODY']
   for (const key of keys) {
     const idx = p.search(new RegExp(`^${key}:`, 'im'))
     if (idx >= 0) {
-      const afterKey = p.substring(idx + key.length + 1) // skip "KEY:"
-      // Find next key
-      let endIdx = afterKey.length
-      for (const nextKey of keys) {
-        const nextIdx = afterKey.search(new RegExp(`^${nextKey}:`, 'im'))
-        if (nextIdx > 0 && nextIdx < endIdx) endIdx = nextIdx
-      }
-      sections[key] = afterKey.substring(0, endIdx).trim()
+      const after = p.substring(idx + key.length + 1)
+      let end = after.length
+      for (const nk of keys) { const ni = after.search(new RegExp(`^${nk}:`, 'im')); if (ni > 0 && ni < end) end = ni }
+      sections[key] = after.substring(0, end).trim()
     }
   }
-
-  const bodyRaw = sections['BODY'] || ''
-  const bodyLines = bodyRaw.split('\n').map(l => l.trim()).filter(l => l.length > 0)
-
   return {
-    brand: sections['BRAND'] || get('BRAND'),
-    headerColor: sections['HEADER_COLOR'] || get('HEADER_COLOR'),
-    headerLink: sections['HEADER_LINK'] || get('HEADER_LINK'),
-    bodyLines,
-    buttonText: sections['BUTTON'] || get('BUTTON'),
-    bannerText: sections['BANNER'] || '',
-    secondBody: sections['SECOND_BODY'] || '',
+    brand: sections['BRAND'] || '', headerColor: sections['HEADER_COLOR'] || '',
+    bodyLines: (sections['BODY'] || '').split('\n').map(l => l.trim()).filter(l => l.length > 0),
+    buttonText: sections['BUTTON'] || '', bannerText: sections['BANNER'] || '',
+    secondBody: sections['SECOND_BODY'] || '', headerLink: sections['HEADER_LINK'] || '',
   }
 }
 
-// Apply brand swap on FULL HTML (head + body) — no AI, no token limits
-function codeBrandSwap(fullHtml: string, v: ReturnType<typeof parseVisionOutput>): string {
-  let r = fullHtml
-
-  // === HEAD changes ===
+function brandSwap(html: string, v: ReturnType<typeof parseVision>): string {
+  let r = html
   if (v.brand) {
-    // Title
     r = r.replace(/<title>[^<]*<\/title>/i, `<title>${v.brand}</title>`)
-    // JSON-LD name
-    r = r.replace(/("name":\s*")[^"]*(")/, `$1${v.brand}$2`)
+    r = r.replace(/("name":\s*")[^"]*(")/,`$1${v.brand}$2`)
+    r = r.replace(/alt="[^"]{1,20}"/gi, m => m.match(/chat|phone|mobile|bubble|spacer/i) ? m : `alt="${v.brand}"`)
   }
-
-  // === HEADER BAR color ===
   if (v.headerColor && /^#[0-9a-f]{6}$/i.test(v.headerColor)) {
-    // Find the first colored table after <body> (the header bar)
-    // It's the first table with a non-gray, non-white bgcolor
-    r = r.replace(
-      /(<table\s+bgcolor=")#(?!EDF0F2|ffffff|FFFFFF|f4f4f4|F4F4F4)([0-9a-fA-F]{6})("[^>]*style="[^"]*background-color:\s*)#[0-9a-fA-F]{6}/i,
-      `$1${v.headerColor}$3${v.headerColor}`
-    )
+    r = r.replace(/(<table\s+bgcolor=")#(?!EDF0F2|ffffff|f4f4f4)([0-9a-fA-F]{6})("[^>]*style="[^"]*background-color:\s*)#[0-9a-fA-F]{6}/i, `$1${v.headerColor}$3${v.headerColor}`)
+    r = r.replace(/bgcolor="#201747"/gi, `bgcolor="${v.headerColor}"`).replace(/background-color:\s*#201747/gi, `background-color: ${v.headerColor}`)
   }
-
-  // === LOGO alt text ===
-  if (v.brand) {
-    r = r.replace(/alt="[^"]{1,20}"/gi, (match) => {
-      const val = match.slice(5, -1)
-      if (val.match(/chat|phone|mobile|bubble|spacer/i)) return match
-      return `alt="${v.brand}"`
-    })
-  }
-
-  // === HEADER LINK text ===
-  if (v.headerLink) {
-    r = r.replace(/>Log in[^<]*</gi, `>${v.headerLink}<`)
-    r = r.replace(/>Sign in[^<]*</gi, `>${v.headerLink}<`)
-  }
-
-  // === BODY TEXT (first 16px td) ===
+  if (v.headerLink) { r = r.replace(/>Log in[^<]*</gi, `>${v.headerLink}<`); r = r.replace(/>Sign in[^<]*</gi, `>${v.headerLink}<`) }
   if (v.bodyLines.length > 0) {
-    const newBody = ' \n            ' + v.bodyLines.join('<br>\n            <br>\n            ') + ' '
-    r = r.replace(
-      /(<td[^>]*style="[^"]*font-size:\s*16px[^"]*padding-top:\s*50px[^"]*"[^>]*>)[\s\S]*?(<\/td>)/i,
-      `$1${newBody}$2`
-    )
+    const nb = ' \n            ' + v.bodyLines.join('<br>\n            <br>\n            ') + ' '
+    r = r.replace(/(<td[^>]*style="[^"]*font-size:\s*16px[^"]*padding-top:\s*50px[^"]*"[^>]*>)[\s\S]*?(<\/td>)/i, `$1${nb}$2`)
   }
-
-  // === BUTTON TEXT ===
   if (v.buttonText) {
-    r = r.replace(
-      /(<a[^>]*style="[^"]*padding:\s*12px[^"]*text-decoration:\s*none[^"]*"[^>]*>)[\s\S]*?(<\/a>)/gi,
-      `$1${v.buttonText}$2`
-    )
-    r = r.replace(/>View your statement</gi, `>${v.buttonText}<`)
-    r = r.replace(/>Get Started</gi, `>${v.buttonText}<`)
+    r = r.replace(/(<a[^>]*style="[^"]*padding:\s*12px[^"]*text-decoration:\s*none[^"]*"[^>]*>)[\s\S]*?(<\/a>)/gi, `$1${v.buttonText}$2`)
+    r = r.replace(/>View your statement</gi, `>${v.buttonText}<`).replace(/>Get Started</gi, `>${v.buttonText}<`)
   }
-
-  // === SECOND BODY (clear if EMPTY) ===
-  if (v.secondBody.toUpperCase() === 'EMPTY' || v.secondBody === '') {
-    r = r.replace(
-      /(<td[^>]*style="[^"]*font-size:\s*16px[^"]*padding-bottom:\s*50px[^"]*"[^>]*>)[\s\S]*?(<\/td>)/i,
-      `$1 $2`
-    )
-  } else if (v.secondBody) {
-    r = r.replace(
-      /(<td[^>]*style="[^"]*font-size:\s*16px[^"]*padding-bottom:\s*50px[^"]*"[^>]*>)[\s\S]*?(<\/td>)/i,
-      `$1 ${v.secondBody} $2`
-    )
+  if (!v.secondBody || v.secondBody.toUpperCase() === 'EMPTY') {
+    r = r.replace(/(<td[^>]*style="[^"]*font-size:\s*16px[^"]*padding-bottom:\s*50px[^"]*"[^>]*>)[\s\S]*?(<\/td>)/i, `$1 $2`)
   }
-
-  // === BANNER TEXT ===
   if (v.bannerText && v.bannerText.length > 20) {
-    r = r.replace(
-      /(<td[^>]*style="[^"]*font-size:\s*14px[^"]*font-weight:\s*400[^"]*"[^>]*align="center">)[\s\S]*?(<\/td>)/i,
-      `$1${v.bannerText}$2`
-    )
+    r = r.replace(/(<td[^>]*style="[^"]*font-size:\s*14px[^"]*font-weight:\s*400[^"]*"[^>]*align="center">)[\s\S]*?(<\/td>)/i, `$1${v.bannerText}$2`)
   }
-
-  // === DARK FOOTER BAR color ===
-  if (v.headerColor && /^#[0-9a-f]{6}$/i.test(v.headerColor)) {
-    // The dark bar (usually #201747 or similar) — change to brand color
-    r = r.replace(
-      /bgcolor="#201747"/gi, `bgcolor="${v.headerColor}"`
-    )
-    r = r.replace(
-      /background-color:\s*#201747/gi, `background-color: ${v.headerColor}`
-    )
-  }
-
-  // === Brand name in remaining visible text ===
-  if (v.brand) {
-    r = r.replace(/The SoFi Team/gi, `The ${v.brand} Team`)
-    r = r.replace(/SoFi mobile app/gi, `${v.brand} app`)
-    r = r.replace(/SoFi login information/gi, `${v.brand} login information`)
-  }
-
+  if (v.brand) { r = r.replace(/The SoFi Team/gi, `The ${v.brand} Team`); r = r.replace(/SoFi mobile app/gi, `${v.brand} app`) }
   return r
-}
-
-async function callAI(provider: string, model: string, apiKey: string, system: string, prompt: string, imageBase64?: string): Promise<string> {
-  if (provider === 'groq') return callGroq(apiKey, model, system, prompt, imageBase64)
-  if (provider === 'claude') return callClaude(apiKey, model, system, prompt, imageBase64)
-  throw new Error('Unknown provider')
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json()
-    const { provider, model, apiKey, prompt, currentHtml, imageBase64, action, includeHtml, conversationHistory,
-      visionProvider, visionModel, visionApiKey } = body
+    const { provider, model, apiKey, prompt, currentHtml, imageBase64, action, includeHtml,
+      conversationHistory, visionProvider, visionModel, visionApiKey } = await req.json()
 
     if (!apiKey) return NextResponse.json({ error: 'API key required' }, { status: 400 })
 
-    const budget = getContextBudget(provider, model, estimateTokens(EDIT_SYSTEM))
-    const htmlParts = (includeHtml && currentHtml) ? splitHtml(currentHtml) : null
-
-    let historyText = ''
-    if (conversationHistory?.length) {
-      historyText = conversationHistory.slice(-4).map((m: any) => `${m.role}: ${m.content}`).join('\n')
-    }
-
-    // ============================================
-    // CASE 1: Image + existing HTML = vision plan + code apply
-    // ============================================
-    if (action === 'image-to-html' && imageBase64 && htmlParts) {
-      // ONLY AI call: vision reads image (small request, fits any TPM)
-      const vProv = visionProvider || provider
-      const vModel = visionModel || model
-      const vKey = visionApiKey || apiKey
-
+    // ── TRANSFORM: image + existing HTML ──
+    if (action === 'image-to-html' && imageBase64 && includeHtml && currentHtml) {
+      const vp = visionProvider || provider, vm = visionModel || model, vk = visionApiKey || apiKey
       let plan = ''
-      try {
-        plan = await callAI(vProv, vModel, vKey, VISION_SYSTEM,
-          'Read this email screenshot. Extract brand, colors, all text. Use the exact output format.',
-          imageBase64)
-      } catch (e: any) {
-        return NextResponse.json({ error: `Vision failed: ${e.message}` }, { status: 500 })
-      }
-
-      // Parse and apply ALL replacements in code on FULL HTML
-      const v = parseVisionOutput(plan)
-      const html = codeBrandSwap(currentHtml, v)
-
-      return NextResponse.json({
-        html,
-        plan,
-        steps: [
-          `Vision: brand="${v.brand}", color="${v.headerColor}", button="${v.buttonText}"`,
-          `Body: ${v.bodyLines.length} lines`,
-          'Code: applied all replacements on full HTML',
-        ],
-      })
+      try { plan = await callAI(vp, vm, vk, VISION_SYSTEM, 'Read this email. Extract brand, colors, all text.', imageBase64) }
+      catch (e: any) { return NextResponse.json({ error: `Vision: ${e.message}` }, { status: 500 }) }
+      const v = parseVision(plan)
+      return NextResponse.json({ html: brandSwap(currentHtml, v), plan, editDescription: `Transformed: brand=${v.brand}` })
     }
 
-    // ============================================
-    // CASE 2: Image only, no existing HTML
-    // ============================================
+    // ── IMAGE ONLY: build from scratch ──
     if (action === 'image-to-html' && imageBase64) {
-      const result = await callAI(provider, model, apiKey,
-        'Build HTML emails from screenshots. Return FULL HTML, inline CSS, table-based.',
-        `Build a complete HTML email matching this image.${prompt ? ` ${prompt}` : ''}`,
-        imageBase64)
-      let html = result.replace(/```html?\s*/g, '').replace(/```/g, '')
-      const doc = html.match(/(<!DOCTYPE[\s\S]*<\/html>)/i)
-      if (doc) html = doc[1]
-      return NextResponse.json({ html })
+      const r = await callAI(provider, model, apiKey, 'Build a professional HTML email from this screenshot. Table-based, inline CSS, 600px width.', prompt || 'Build this email.', imageBase64)
+      let h = r.replace(/```html?\s*/g, '').replace(/```/g, '')
+      const d = h.match(/(<!DOCTYPE[\s\S]*<\/html>)/i); if (d) h = d[1]
+      return NextResponse.json({ html: h })
     }
 
-    // ============================================
-    // CASE 3: Smart edit — AI outputs JSON instruction, code applies it
-    // ============================================
-    if (htmlParts) {
-      // Direct hex replacement (no AI needed)
-      const hexReplaceMatch = prompt?.match(/(#[0-9a-fA-F]{6})\s+to\s+(#[0-9a-fA-F]{6})/i)
-      if (hexReplaceMatch) {
-        const newHtml = currentHtml.replace(new RegExp(hexReplaceMatch[1], 'gi'), hexReplaceMatch[2])
-        return NextResponse.json({ html: newHtml })
-      }
-
-      // AI understands the request and outputs a JSON instruction
-      // This is MUCH smaller than sending the full HTML — just the instruction
-      const SMART_EDIT_SYSTEM = `You are an HTML email editor assistant. The user wants to make a change to their email.
-Analyze the request and output ONLY a JSON object describing what to change.
-Output format:
-{"action": "change_color", "target": "button|header|background|text", "value": "#hexcolor"}
-or
-{"action": "replace_text", "find": "exact text to find", "replace": "new text"}
-or
-{"action": "change_button_text", "value": "new button text"}
-or
-{"action": "unknown", "message": "explain what you cannot do"}
-
-For colors, always output a valid hex color code.
-Output ONLY the JSON object, nothing else.`
-
-      let instruction: any = null
+    // ── SMART EDIT: try JSON instruction first (small AI call, no HTML sent) ──
+    if (includeHtml && currentHtml && /change|replace|swap|color|font|size|button|header|background|text to|with /i.test(prompt || '')) {
+      const SYS = `OUTPUT ONLY JSON. Parse the user request into a JSON edit instruction.
+Examples:
+"change button color to blue" -> {"action":"change_color","target":"button","value":"#0078D4"}
+"make header red" -> {"action":"change_color","target":"header","value":"#e74c3c"}
+"change background to yellow" -> {"action":"change_color","target":"background","value":"#f1c40f"}
+"replace Hello with Hi" -> {"action":"replace_text","find":"Hello","replace":"Hi"}
+"change button text to Sign Up" -> {"action":"change_button_text","value":"Sign Up"}
+JSON ONLY.`
+      let inst: any = null
       try {
-        const aiResponse = await callAI(provider, model, apiKey, SMART_EDIT_SYSTEM, `User request: ${prompt}`)
-        const jsonMatch = aiResponse.match(/\{[\s\S]*\}/)
-        if (jsonMatch) instruction = JSON.parse(jsonMatch[0])
+        const r = await callAI(provider, model, apiKey, SYS, prompt || '')
+        const j = r.match(/\{[\s\S]*?\}/); if (j) inst = JSON.parse(j[0])
       } catch {}
 
-      if (instruction && instruction.action !== 'unknown') {
-        let newHtml = currentHtml
-        let changed = false
-        let description = ''
-
-        if (instruction.action === 'change_color' && instruction.value) {
-          const hex = instruction.value
-          const target = (instruction.target || '').toLowerCase()
-          if (target.includes('button') || target.includes('cta')) {
-            newHtml = newHtml.replace(
-              /(<td\s[^>]*bgcolor=")([^"]+)("[^>]*>[\s\S]{0,500}?<a[^>]*padding[^>]*>)/gi,
-              (_m: string, p1: string, _old: string, p2: string) => { changed = true; return p1 + hex + p2 })
-
-            description = `Button color changed to ${hex}`
-          } else if (target.includes('header') || target.includes('banner') || target.includes('top')) {
-            let count = 0
-            newHtml = newHtml.replace(/bgcolor="(#[0-9a-fA-F]{3,6})"/gi, (_m: string, c: string) => {
-              if (count === 0 && c.toLowerCase() !== '#edf0f2' && c.toLowerCase() !== '#ffffff') {
-                count++; changed = true; return `bgcolor="${hex}"`
-              }
-              return _m
-            });
-            description = `Header color changed to ${hex}`
-          } else if (target.includes('background') || target.includes('bg') || target.includes('body')) {
-            newHtml = newHtml
-              .replace(/bgcolor="#EDF0F2"/gi, () => { changed = true; return `bgcolor="${hex}"` })
-              .replace(/background-color:\s*#EDF0F2/gi, () => { changed = true; return `background-color: ${hex}` })
-            description = `Background changed to ${hex}`
-          } else {
-            // Generic — try all color targets
-            newHtml = newHtml.replace(new RegExp(instruction.value.replace('#', '#'), 'gi'), hex)
-            changed = true
-            description = `Color changed to ${hex}`
-          }
-        } else if (instruction.action === 'replace_text' && instruction.find && instruction.replace !== undefined) {
-          if (newHtml.includes(instruction.find)) {
-            newHtml = newHtml.split(instruction.find).join(instruction.replace)
-            changed = true
-            description = `Replaced "${instruction.find}" with "${instruction.replace}"`
-          } else {
-            const regex = new RegExp(instruction.find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
-            newHtml = newHtml.replace(regex, instruction.replace)
-            changed = newHtml !== currentHtml
-            description = changed ? `Replaced "${instruction.find}" with "${instruction.replace}"` : `"${instruction.find}" not found`
-          }
-        } else if (instruction.action === 'change_button_text' && instruction.value) {
-          newHtml = newHtml.replace(
-            /(<a[^>]*style="[^"]*padding:\s*12px[^"]*text-decoration:\s*none[^"]*"[^>]*>)([\s\S]*?)(<\/a>)/gi,
-            (_m: string, open: string, _old: string, close: string) => { changed = true; return open + instruction.value + close })
-
-          description = changed ? `Button text changed to "${instruction.value}"` : 'Could not find button'
-        }
-
-        if (changed) {
-          return NextResponse.json({ html: newHtml, editDescription: description })
-        } else {
-          return NextResponse.json({ error: description || 'Could not apply the change. Try using the visual editor.' }, { status: 400 })
-        }
+      // Fallback: parse color from text directly
+      if (!inst) {
+        const cm = (prompt || '').match(/(?:to|as)\s+(blue|red|green|yellow|orange|purple|pink|black|white|gray|teal|navy|cyan|#[0-9a-f]{3,6})/i)
+        const tm = (prompt || '').match(/(button|header|background|banner|body)/i)
+        const colors: Record<string,string> = {blue:'#0078D4',red:'#e74c3c',green:'#27ae60',yellow:'#f1c40f',orange:'#e67e22',purple:'#8e44ad',pink:'#e91e63',black:'#000',white:'#fff',gray:'#666',teal:'#1abc9c',navy:'#2c3e50',cyan:'#00bcd4'}
+        if (cm) { const hex = colors[cm[1].toLowerCase()] || (cm[1].startsWith('#') ? cm[1] : null); if (hex) inst = {action:'change_color',target:tm?.[1]||'button',value:hex} }
       }
 
-      // Fallback: AI couldn't parse — return helpful message
-      const msg = instruction?.message || 'Could not understand the request. Try: "change button color to blue" or "replace X with Y"'
-      return NextResponse.json({ error: msg }, { status: 400 })
+      if (inst && inst.action === 'change_color' && inst.value) {
+        let h = currentHtml, ok = false
+        const hex = inst.value, t = (inst.target||'').toLowerCase()
+        if (t.includes('button')||t.includes('cta')) { h = h.replace(/(<td\s[^>]*bgcolor=")([^"]+)("[^>]*>[\s\S]{0,500}?<a[^>]*padding)/gi, (_:string,a:string,__:string,b:string)=>{ok=true;return a+hex+b}) }
+        else if (t.includes('header')||t.includes('banner')||t.includes('top')) { let c=0; h = h.replace(/bgcolor="(#[0-9a-fA-F]{3,6})"/gi, (_:string,v:string)=>{if(c===0&&v.toLowerCase()!=='#edf0f2'&&v.toLowerCase()!=='#ffffff'){c++;ok=true;return`bgcolor="${hex}"`}return _}) }
+        else if (t.includes('background')||t.includes('bg')||t.includes('body')) { h=h.replace(/bgcolor="#EDF0F2"/gi,()=>{ok=true;return`bgcolor="${hex}"`}).replace(/background-color:\s*#EDF0F2/gi,()=>{ok=true;return`background-color: ${hex}`}) }
+        if (ok) return NextResponse.json({ html: h, editDescription: `${t} color → ${hex}` })
+      }
+      if (inst && inst.action === 'replace_text' && inst.find) {
+        let h = currentHtml
+        if (h.includes(inst.find)) { h = h.split(inst.find).join(inst.replace||''); return NextResponse.json({ html: h, editDescription: `Replaced "${inst.find}"` }) }
+        const re = new RegExp(inst.find.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'), 'gi')
+        if (re.test(h)) { h = h.replace(re, inst.replace||''); return NextResponse.json({ html: h, editDescription: `Replaced "${inst.find}"` }) }
+      }
+      if (inst && inst.action === 'change_button_text' && inst.value) {
+        let h = currentHtml, ok = false
+        h = h.replace(/(<a[^>]*style="[^"]*padding:\s*12px[^"]*text-decoration:\s*none[^"]*"[^>]*>)([\s\S]*?)(<\/a>)/gi, (_:string,a:string,__:string,b:string)=>{ok=true;return a+inst.value+b})
+        if (ok) return NextResponse.json({ html: h, editDescription: `Button text → "${inst.value}"` })
+      }
+      // If JSON instruction didn't work, fall through to general AI below
     }
 
-    // ============================================
-    // CASE 4: Fresh prompt
-    // ============================================
-    let userPrompt = historyText ? `Chat:\n${historyText}\n\n${prompt}` : prompt
+    // ── GENERAL AI: chat, build, edit, anything ──
+    const SYS = `You are Letter Builder AI. You help build and edit HTML email letters.
 
-    const BUILD_SYSTEM = `You are Letter Builder AI. You build professional HTML email letters.
+WHEN EDITING existing HTML: The user's current email HTML is provided. Make the requested changes and return the COMPLETE modified HTML. Do NOT explain — just return the HTML.
 
-For email building requests, return COMPLETE HTML that:
-- Starts with <!DOCTYPE html> and ends with </html>
-- Uses TABLE-BASED layout (not div) for email client compatibility
-- Has an outer table: width="100%", bgcolor="#f4f4f4" (light gray background)
-- Has an inner table: width="600", centered, bgcolor="#ffffff" (white card)
-- Has a colored HEADER bar with brand name in white text
-- Has BODY content with proper padding (40-50px sides)
-- Has a CTA BUTTON using table-based button (td with bgcolor, a with padding)
-- Has a FOOTER with small gray text, copyright, unsubscribe placeholder
-- Uses INLINE CSS only (style attributes, no <style> tags)
-- Uses web-safe fonts: Arial, Helvetica, sans-serif
-- Uses the brand's real colors if known (Google=#4285f4, Amazon=#ff9900, etc)
-- Marks editable sections with data-editable attributes
-- Looks like a REAL email from that company
+WHEN BUILDING new emails: Return complete table-based HTML email (<!DOCTYPE to </html>), inline CSS, 600px width, proper header/body/button/footer.
 
-For questions: return plain text only, no HTML.`
+WHEN ANSWERING questions: Return plain text.
 
-    const result = await callAI(provider, model, apiKey, BUILD_SYSTEM, userPrompt)
+NEVER give tutorials or code snippets. Either return the full modified/new HTML, or answer the question.`
+
+    let userMsg = prompt || ''
+    if (includeHtml && currentHtml) {
+      const tokens = estimateTokens(currentHtml)
+      if (tokens > 6000) {
+        // HTML too large for AI to edit and return completely
+        // Only send a summary, tell AI to give instructions instead
+        userMsg = `I have an HTML email (${tokens} tokens, too large to include). The user wants: ${prompt}\n\nSince the HTML is too large, please describe the specific CSS/HTML changes needed as a list of find-and-replace instructions. Do NOT return full HTML.`
+      } else {
+        userMsg = `My current email HTML:\n${currentHtml}\n\nRequest: ${prompt}`
+      }
+    }
+
+    if (conversationHistory?.length) {
+      const hist = conversationHistory.slice(-4).map((m: any) => `${m.role}: ${m.content}`).join('\n')
+      userMsg = `Chat history:\n${hist}\n\n${userMsg}`
+    }
+
+    const result = await callAI(provider, model, apiKey, SYS, userMsg, imageBase64)
     let html = result.replace(/```html?\s*/g, '').replace(/```/g, '')
     const doc = html.match(/(<!DOCTYPE[\s\S]*<\/html>)/i)
     if (doc) html = doc[1]
-    return NextResponse.json({ html })
+
+    // Detect if response is HTML or text
+    const isHtml = (html.includes('<table') || html.includes('<html') || html.includes('<body')) && html.length > 200
+    if (isHtml) return NextResponse.json({ html, editDescription: 'Changes applied' })
+    return NextResponse.json({ html: result }) // text response
 
   } catch (e: any) {
     return NextResponse.json({ error: e.message }, { status: 500 })

@@ -23,13 +23,18 @@ export function decryptText(encrypted: string, key: string = ENCRYPTION_KEY): st
   }
 }
 
-// Browser fingerprint as HWID
+// Browser fingerprint as HWID — stable across sessions
 export async function getHWID(): Promise<string> {
+  // Check localStorage first for consistency
+  const saved = localStorage.getItem('lb_hwid')
+  if (saved) return saved
+
+  let hwid = ''
   try {
     const FingerprintJS = (await import('@fingerprintjs/fingerprintjs' as any)).default
     const fp = await FingerprintJS.load()
     const result = await fp.get()
-    return result.visitorId
+    hwid = result.visitorId
   } catch {
     // Fallback: generate from navigator properties
     const nav = window.navigator
@@ -43,8 +48,12 @@ export async function getHWID(): Promise<string> {
       hash = ((hash << 5) - hash) + raw.charCodeAt(i)
       hash |= 0
     }
-    return Math.abs(hash).toString(16)
+    hwid = Math.abs(hash).toString(16)
   }
+
+  // Persist so it never changes
+  localStorage.setItem('lb_hwid', hwid)
+  return hwid
 }
 
 // Save license to localStorage (encrypted)

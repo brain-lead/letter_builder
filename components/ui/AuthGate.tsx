@@ -20,7 +20,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
       const res = await fetch('/api/auth', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ hwid, licenseKey: key }),
+        body: JSON.stringify({ hwid, licenseKey: key, computerUsername: `web_${hwid.substring(0, 12)}` }),
       })
       const data = await res.json()
 

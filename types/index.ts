@@ -1,4 +1,4 @@
-export type AIProvider = 'groq' | 'claude'
+export type AIProvider = 'groq' | 'claude' | 'openai'
 
 export type AIModel = {
   id: string
@@ -25,6 +25,12 @@ export const MODELS: Record<AIProvider, AIModel[]> = {
     { id: 'claude-opus-4-6', name: 'Claude Opus 4.6 (powerful)', vision: true, contextWindow: 1000000, maxOutput: 128000 },
     { id: 'claude-opus-4-5-20251101', name: 'Claude Opus 4.5', vision: true, contextWindow: 200000, maxOutput: 64000 },
     { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5 (fast)', vision: true, contextWindow: 200000, maxOutput: 64000 },
+  ],
+  openai: [
+    { id: 'gpt-4o', name: 'GPT-4o ✨', vision: true, contextWindow: 128000, maxOutput: 16384 },
+    { id: 'gpt-4o-mini', name: 'GPT-4o Mini (fast)', vision: true, contextWindow: 128000, maxOutput: 16384 },
+    { id: 'gpt-4-turbo', name: 'GPT-4 Turbo', vision: true, contextWindow: 128000, maxOutput: 4096 },
+    { id: 'gpt-3.5-turbo', name: 'GPT-3.5 Turbo (cheap)', contextWindow: 16385, maxOutput: 4096 },
   ],
 }
 

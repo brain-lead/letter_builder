@@ -208,7 +208,7 @@ export default function ChatPanel() {
       {showSettings && (
         <div className="flex gap-2 flex-wrap items-center p-2 border-b border-zinc-700 bg-zinc-800/50">
           <select value={aiProvider} onChange={e => setAiProvider(e.target.value as AIProvider)} className="bg-zinc-700 text-zinc-200 text-[11px] rounded px-2 py-1 border border-zinc-600">
-            <option value="groq">Groq</option><option value="claude">Claude</option>
+            <option value="groq">Groq</option><option value="claude">Claude</option><option value="openai">ChatGPT</option>
           </select>
           <select value={aiModel} onChange={e => setAiModel(e.target.value)} className="bg-zinc-700 text-zinc-200 text-[11px] rounded px-2 py-1 border border-zinc-600">
             {MODELS[aiProvider].map(m => <option key={m.id} value={m.id}>{m.name}{m.vision ? ' 👁' : ''}</option>)}
