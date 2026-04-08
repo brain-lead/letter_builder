@@ -50,6 +50,10 @@ export default function VisualEditor() {
       body { margin: 0; padding: 0; }
       * { cursor: default; }
       a { cursor: pointer; }
+      td[bgcolor], td[style*="background"], th[bgcolor], th[style*="background"] { cursor: pointer; }
+      td[bgcolor]:hover, td[style*="background"]:hover, th[bgcolor]:hover, th[style*="background"]:hover,
+      table[bgcolor]:hover, table[style*="background"]:hover,
+      div[style*="background"]:hover { outline: 2px dashed rgba(99,102,241,0.5); outline-offset: -2px; }
       img { cursor: pointer; outline: none; transition: outline 0.1s; }
       img:hover { outline: 3px solid #6366f1; outline-offset: 2px; }
       ::selection { background: #b4d7ff; }
@@ -65,6 +69,15 @@ export default function VisualEditor() {
         e.preventDefault()
         setImgTarget(t as HTMLImageElement)
         setImgUrl((t as HTMLImageElement).src.startsWith('data:') ? '' : (t as HTMLImageElement).src)
+      }
+      // Allow selecting td with bgcolor by holding Alt key
+      if (e.altKey && t.closest('td[bgcolor]')) {
+        e.preventDefault()
+        const td = t.closest('td[bgcolor]') as HTMLElement
+        td.style.outline = '3px solid #6366f1'
+        setSelectedTag('td[bgcolor]')
+        // Read bg color
+        setInfo(prev => ({ ...prev, bg: td.getAttribute('bgcolor') || td.style.backgroundColor }))
       }
     })
     doc.addEventListener('input', () => {
