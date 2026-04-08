@@ -70,14 +70,27 @@ export default function VisualEditor() {
         setImgTarget(t as HTMLImageElement)
         setImgUrl((t as HTMLImageElement).src.startsWith('data:') ? '' : (t as HTMLImageElement).src)
       }
-      // Allow selecting td with bgcolor by holding Alt key
-      if (e.altKey && t.closest('td[bgcolor]')) {
-        e.preventDefault()
-        const td = t.closest('td[bgcolor]') as HTMLElement
-        td.style.outline = '3px solid #6366f1'
-        setSelectedTag('td[bgcolor]')
-        // Read bg color
-        setInfo(prev => ({ ...prev, bg: td.getAttribute('bgcolor') || td.style.backgroundColor }))
+      // Clear any box selection when clicking normally
+      doc.querySelectorAll('[data-box-sel]').forEach(el => {
+        (el as HTMLElement).style.outline = ''; el.removeAttribute('data-box-sel')
+      })
+      ;(doc as any)._selectedBox = null
+    })
+    // Right-click also selects the nearest colored container
+    doc.addEventListener('contextmenu', (e) => {
+      e.preventDefault()
+      const t = e.target as HTMLElement
+      const box = t.closest('td[bgcolor], td[style*="background"], th[bgcolor], table[bgcolor], table[style*="background"], div[style*="background"]') as HTMLElement
+      if (box) {
+        doc.querySelectorAll('[data-box-sel]').forEach(el => {
+          (el as HTMLElement).style.outline = ''; el.removeAttribute('data-box-sel')
+        })
+        box.setAttribute('data-box-sel', '1')
+        box.style.outline = '3px solid #6366f1'
+        const bg = box.getAttribute('bgcolor') || box.style.backgroundColor || ''
+        setSelectedTag(box.tagName.toLowerCase() + ' (box)')
+        setInfo(prev => ({ ...prev, bg }))
+        ;(doc as any)._selectedBox = box
       }
     })
     doc.addEventListener('input', () => {
@@ -92,17 +105,25 @@ export default function VisualEditor() {
     setTimeout(() => { ignoreNextSync.current = false }, 500)
   }, [])
 
-  // Sync iframe content back to store (debounced)
+  // Sync iframe content back to store (debounced) + commit to history
+  const commitTimer = useRef<ReturnType<typeof setTimeout>|null>(null)
   const syncFromIframe = useCallback(() => {
     if (syncTimer.current) clearTimeout(syncTimer.current)
     syncTimer.current = setTimeout(() => {
       const doc = getDoc()
       if (!doc?.body || isWriting.current) return
       const content = doc.body.innerHTML
-      lastWritten.current = content // prevent re-render loop
+      lastWritten.current = content
       setHtml(content)
     }, 300)
-  }, [setHtml])
+    // Also commit to history after user stops typing for 1.5s
+    if (commitTimer.current) clearTimeout(commitTimer.current)
+    commitTimer.current = setTimeout(() => {
+      const doc = getDoc()
+      if (!doc?.body || isWriting.current) return
+      pushHtml(doc.body.innerHTML)
+    }, 1500)
+  }, [setHtml, pushHtml])
 
   // Commit to undo history
   const commitHistory = useCallback(() => {
@@ -138,6 +159,17 @@ export default function VisualEditor() {
   const exec = (cmd: string, value?: string) => {
     const doc = getDoc()
     if (!doc) return
+    // If changing bg color and a box is selected via right-click, change that box
+    if ((cmd === 'hiliteColor' || cmd === 'backColor') && (doc as any)._selectedBox) {
+      const box = (doc as any)._selectedBox as HTMLElement
+      if (box.hasAttribute('bgcolor')) box.setAttribute('bgcolor', value || '')
+      box.style.backgroundColor = value || ''
+      box.style.outline = ''
+      box.removeAttribute('data-box-sel')
+      ;(doc as any)._selectedBox = null
+      syncFromIframe()
+      return
+    }
     doc.execCommand(cmd, false, value)
     syncFromIframe()
   }
@@ -146,10 +178,14 @@ export default function VisualEditor() {
   const lastWritten = useRef('')
   useEffect(() => {
     if (!iframeRef.current) return
-    if (html === lastWritten.current) return // skip our own sync
+    if (html === lastWritten.current) return
     lastWritten.current = html
     writeToIframe(html)
   }, [html, writeToIframe])
+
+  // Force re-render on undo/redo by wrapping them
+  const doUndo = () => { lastWritten.current = ''; undo() }
+  const doRedo = () => { lastWritten.current = ''; redo() }
 
   // Initial load — only once
   const initialized = useRef(false)
@@ -163,8 +199,8 @@ export default function VisualEditor() {
   // Keyboard shortcuts
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      if ((e.ctrlKey||e.metaKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo() }
-      if ((e.ctrlKey||e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); redo() }
+      if ((e.ctrlKey||e.metaKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); doUndo() }
+      if ((e.ctrlKey||e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); doRedo() }
     }
     window.addEventListener('keydown', h)
     return () => window.removeEventListener('keydown', h)
@@ -225,13 +261,15 @@ export default function VisualEditor() {
           <span>Visual Editor</span>
           {selectedTag && <span className="text-indigo-400 font-normal">• &lt;{selectedTag}&gt;</span>}
         </div>
-        <span className="text-zinc-600 text-[10px]">Select text → use toolbar to format</span>
+        <span className="text-zinc-600 text-[10px]">Select text → toolbar • Right-click → change box color</span>
       </div>
 
       {/* Toolbar */}
       <div className="flex items-center gap-0.5 px-2 py-1 bg-zinc-800 border-b border-zinc-700 flex-wrap">
-        <Btn onClick={undo} title="Undo" disabled={!canUndo()}><Undo2 size={14}/></Btn>
-        <Btn onClick={redo} title="Redo" disabled={!canRedo()}><Redo2 size={14}/></Btn>
+        <button onClick={()=>doUndo()} title="Undo" disabled={!canUndo()}
+          className={`p-1.5 rounded transition-colors ${!canUndo()?'opacity-30 cursor-not-allowed':'hover:bg-zinc-700 text-zinc-300'}`}><Undo2 size={14}/></button>
+        <button onClick={()=>doRedo()} title="Redo" disabled={!canRedo()}
+          className={`p-1.5 rounded transition-colors ${!canRedo()?'opacity-30 cursor-not-allowed':'hover:bg-zinc-700 text-zinc-300'}`}><Redo2 size={14}/></button>
         <Sep/>
         <div className="relative">
           <Btn onClick={()=>setActivePanel(activePanel==='textColor'?null:'textColor')} title="Text Color">
