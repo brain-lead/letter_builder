@@ -3,6 +3,7 @@ export async function callOpenAI(
   model: string,
   systemPrompt: string,
   userPrompt: string,
+  maxTokens: number = 16384,
   imageBase64?: string
 ): Promise<string> {
   const OpenAI = (await import('openai')).default
@@ -24,7 +25,7 @@ export async function callOpenAI(
   try {
     const res = await client.chat.completions.create({
       model,
-      max_tokens: 16384,
+      max_tokens: maxTokens,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content },

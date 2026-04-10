@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { estimateTokens, trimHtmlToFit } from '@/types'
+import { estimateTokens, trimHtmlToFit, getContextBudget, AIProvider, MODELS } from '@/types'
 
 async function callAI(provider: string, model: string, apiKey: string, system: string, prompt: string, imageBase64?: string): Promise<string> {
-  if (provider === 'groq') return (await import('@/lib/ai/groq')).callGroq(apiKey, model, system, prompt, imageBase64)
-  if (provider === 'claude') return (await import('@/lib/ai/claude')).callClaude(apiKey, model, system, prompt, imageBase64)
-  if (provider === 'openai') return (await import('@/lib/ai/openai')).callOpenAI(apiKey, model, system, prompt, imageBase64)
+  const modelInfo = MODELS[provider as AIProvider]?.find(m => m.id === model)
+  const maxTokens = Math.min(modelInfo?.maxOutput ?? 16384, 16384)
+  if (provider === 'groq') return (await import('@/lib/ai/groq')).callGroq(apiKey, model, system, prompt, maxTokens, imageBase64)
+  if (provider === 'claude') return (await import('@/lib/ai/claude')).callClaude(apiKey, model, system, prompt, maxTokens, imageBase64)
+  if (provider === 'openai') return (await import('@/lib/ai/openai')).callOpenAI(apiKey, model, system, prompt, maxTokens, imageBase64)
   throw new Error('Unknown provider: ' + provider)
 }
 
@@ -12,15 +14,17 @@ async function callAI(provider: string, model: string, apiKey: string, system: s
 const VISION_SYSTEM = `You read email screenshots. Extract ALL visible text and colors.
 Output this EXACT format:
 BRAND: [brand name]
-HEADER_COLOR: [hex color of header bar]
+HEADER_COLOR: [hex color of header/top bar]
+BUTTON_COLOR: [hex color of the main CTA button]
+BG_COLOR: [hex color of the page background behind the email, or SAME if white/light gray]
 BODY:
-[every line of body text]
+[every line of body text above the button]
 BUTTON: [button text]
-BANNER:
-[banner/notice text if any]
 SECOND_BODY:
-[text below button, or EMPTY]
-Be EXACT. Copy text word for word.`
+[text below the button but still in the white area, or EMPTY if none]
+BANNER:
+[text in a colored/gray bar between the main content and footer - often a notice, disclaimer, or promo. EMPTY if none]
+Be EXACT. Copy text word for word. For colors, output ONLY the hex code like #0078D4.`
 
 function splitHtml(html: string) {
   const m = html.match(/<body[^>]*>/i)
@@ -33,7 +37,7 @@ function splitHtml(html: string) {
 function parseVision(plan: string) {
   const p = plan.replace(/\r\n/g, '\n')
   const sections: Record<string, string> = {}
-  const keys = ['BRAND', 'HEADER_COLOR', 'HEADER_LINK', 'BODY', 'BUTTON', 'BANNER', 'SECOND_BODY']
+  const keys = ['BRAND', 'HEADER_COLOR', 'BUTTON_COLOR', 'BG_COLOR', 'HEADER_LINK', 'BODY', 'BUTTON', 'BANNER', 'SECOND_BODY']
   for (const key of keys) {
     const idx = p.search(new RegExp(`^${key}:`, 'im'))
     if (idx >= 0) {
@@ -44,11 +48,19 @@ function parseVision(plan: string) {
     }
   }
   return {
-    brand: sections['BRAND'] || '', headerColor: sections['HEADER_COLOR'] || '',
+    brand: sections['BRAND'] || '', headerColor: (sections['HEADER_COLOR'] || '').match(/#[0-9a-fA-F]{6}/)?.[0] || '',
+    buttonColor: (sections['BUTTON_COLOR'] || '').match(/#[0-9a-fA-F]{6}/)?.[0] || '',
+    bgColor: (sections['BG_COLOR'] || '').match(/#[0-9a-fA-F]{6}/)?.[0] || '',
     bodyLines: (sections['BODY'] || '').split('\n').map(l => l.trim()).filter(l => l.length > 0),
     buttonText: sections['BUTTON'] || '', bannerText: sections['BANNER'] || '',
     secondBody: sections['SECOND_BODY'] || '', headerLink: sections['HEADER_LINK'] || '',
   }
+  // Fix common AI mistake: long disclaimer in SECOND_BODY is actually the BANNER
+  if (!result.bannerText && result.secondBody.length > 100 && /confidential|disclaimer|prohibited|privacy|notice/i.test(result.secondBody)) {
+    result.bannerText = result.secondBody
+    result.secondBody = 'EMPTY'
+  }
+  return result
 }
 
 function brandSwap(html: string, v: ReturnType<typeof parseVision>): string {
@@ -61,6 +73,13 @@ function brandSwap(html: string, v: ReturnType<typeof parseVision>): string {
   if (v.headerColor && /^#[0-9a-f]{6}$/i.test(v.headerColor)) {
     r = r.replace(/(<table\s+bgcolor=")#(?!EDF0F2|ffffff|f4f4f4)([0-9a-fA-F]{6})("[^>]*style="[^"]*background-color:\s*)#[0-9a-fA-F]{6}/i, `$1${v.headerColor}$3${v.headerColor}`)
     r = r.replace(/bgcolor="#201747"/gi, `bgcolor="${v.headerColor}"`).replace(/background-color:\s*#201747/gi, `background-color: ${v.headerColor}`)
+  }
+  if (v.buttonColor && /^#[0-9a-f]{6}$/i.test(v.buttonColor)) {
+    r = r.replace(/bgcolor="#00A9CE"/gi, `bgcolor="${v.buttonColor}"`).replace(/background-color:\s*#00A9CE/gi, `background-color: ${v.buttonColor}`)
+    r = r.replace(/(border:\s*0\s+solid\s+)#00A9CE/gi, `$1${v.buttonColor}`)
+  }
+  if (v.bgColor && /^#[0-9a-f]{6}$/i.test(v.bgColor)) {
+    r = r.replace(/bgcolor="#EDF0F2"/gi, `bgcolor="${v.bgColor}"`).replace(/background-color:\s*#EDF0F2/gi, `background-color: ${v.bgColor}`)
   }
   if (v.headerLink) { r = r.replace(/>Log in[^<]*</gi, `>${v.headerLink}<`); r = r.replace(/>Sign in[^<]*</gi, `>${v.headerLink}<`) }
   if (v.bodyLines.length > 0) {
@@ -107,7 +126,7 @@ export async function POST(req: NextRequest) {
     }
 
     // ── SMART EDIT: try JSON instruction first (small AI call, no HTML sent) ──
-    if (includeHtml && currentHtml && /change|replace|swap|color|font|size|button|header|background|text to|with /i.test(prompt || '')) {
+    if (includeHtml && currentHtml && /change|replace|swap|color|font|size|button|header|background|text to|with |rename|update/i.test(prompt || '')) {
       const SYS = `OUTPUT ONLY JSON. Parse the user request into a JSON edit instruction.
 Examples:
 "change button color to blue" -> {"action":"change_color","target":"button","value":"#0078D4"}
@@ -165,11 +184,13 @@ NEVER give tutorials or code snippets. Either return the full modified/new HTML,
 
     let userMsg = prompt || ''
     if (includeHtml && currentHtml) {
+      const { availableForInput } = getContextBudget(provider as AIProvider, model, 500)
+      // Reserve space for prompt + response; use up to 60% of available input for HTML
+      const htmlBudget = Math.max(4000, Math.floor(availableForInput * 0.6))
       const tokens = estimateTokens(currentHtml)
-      if (tokens > 6000) {
-        // HTML too large for AI to edit and return completely
-        // Only send a summary, tell AI to give instructions instead
-        userMsg = `I have an HTML email (${tokens} tokens, too large to include). The user wants: ${prompt}\n\nSince the HTML is too large, please describe the specific CSS/HTML changes needed as a list of find-and-replace instructions. Do NOT return full HTML.`
+      if (tokens > htmlBudget) {
+        const trimmed = trimHtmlToFit(currentHtml, htmlBudget)
+        userMsg = `My current email HTML (trimmed to fit):\n${trimmed}\n\nRequest: ${prompt}\n\nReturn the COMPLETE modified HTML.`
       } else {
         userMsg = `My current email HTML:\n${currentHtml}\n\nRequest: ${prompt}`
       }

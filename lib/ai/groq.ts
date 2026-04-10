@@ -3,6 +3,7 @@ export async function callGroq(
   model: string,
   systemPrompt: string,
   userPrompt: string,
+  maxTokens: number = 16384,
   imageBase64?: string
 ): Promise<string> {
   const Groq = (await import('groq-sdk')).default
@@ -26,7 +27,7 @@ export async function callGroq(
 
   const res = await client.chat.completions.create({
     model,
-    max_tokens: model.includes('scout') ? 8192 : 16384,
+    max_tokens: maxTokens,
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user', content },

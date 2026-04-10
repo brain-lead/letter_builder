@@ -3,10 +3,11 @@ export async function callClaude(
   model: string,
   systemPrompt: string,
   userPrompt: string,
+  maxTokens: number = 16384,
   imageBase64?: string
 ): Promise<string> {
   const Anthropic = (await import('@anthropic-ai/sdk')).default
-  const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: false })
+  const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: false, timeout: 120_000 })
 
   const content: any[] = []
 
@@ -21,24 +22,27 @@ export async function callClaude(
   content.push({ type: 'text', text: userPrompt })
 
   try {
-    const res = await client.messages.create({
+    const stream = await client.messages.stream({
       model,
-      max_tokens: 16384, // Safe limit that works across all models
+      max_tokens: maxTokens,
       system: systemPrompt,
       messages: [{ role: 'user', content }],
     })
-    return (res.content[0] as any)?.text ?? ''
+    const response = await stream.finalMessage()
+    return (response.content[0] as any)?.text ?? ''
   } catch (e: any) {
-    // Friendly rate limit message
-    if (e?.status === 429 || e?.message?.includes('rate limit') || e?.message?.includes('overloaded')) {
-      throw new Error('Claude rate limit hit (free tier: 5 req/min). Wait 60 seconds and try again, or switch to Groq.')
+    if (e?.name === 'AbortError' || e?.message?.includes('timed out') || e?.message?.includes('timeout')) {
+      throw new Error('Claude took too long to respond. Try a simpler request or switch to Groq.')
+    }
+    if (e?.status === 429 || e?.message?.includes('rate limit')) {
+      throw new Error('Claude rate limit hit. Wait 60 seconds and try again, or switch to Groq.')
     }
     if (e?.status === 401 || e?.message?.includes('authentication')) {
       throw new Error('Invalid Claude API key. Check your key at console.anthropic.com')
     }
-    if (e?.status === 400 && e?.message?.includes('max_tokens')) {
-      throw new Error('Claude output limit exceeded. Try a shorter prompt or switch to Groq.')
+    if (e?.status === 529 || e?.message?.includes('overloaded')) {
+      throw new Error('Claude is overloaded. Wait a moment and try again.')
     }
-    throw e
+    throw new Error(e?.message || 'Claude API error')
   }
 }

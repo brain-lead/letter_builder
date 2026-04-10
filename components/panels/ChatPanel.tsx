@@ -38,6 +38,15 @@ export default function ChatPanel() {
   const imageRef = useRef<HTMLInputElement>(null)
   const transformImgRef = useRef<HTMLInputElement>(null)
   const chatEndRef = useRef<HTMLDivElement>(null)
+  const abortRef = useRef<AbortController | null>(null)
+
+  const cancel = () => {
+    abortRef.current?.abort()
+    abortRef.current = null
+    setIsGenerating(false)
+    setTransforming(false)
+    addMessage({ role: 'assistant', content: '⛔ Cancelled.', isHtml: false })
+  }
 
   useEffect(() => { loadKeys() }, [])
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
@@ -76,8 +85,9 @@ export default function ChatPanel() {
     addMessage({ role: 'user', content: `🔄 Transform to match: ${transformImage.name}`, isHtml: false })
     setTransforming(true)
     try {
+      abortRef.current = new AbortController()
       const res = await fetch('/api/ai', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: abortRef.current.signal,
         body: JSON.stringify({ provider: aiProvider, model: useModel, apiKey: key,
           prompt: 'Transform to match image', currentHtml: html, includeHtml: true,
           imageBase64: transformImage.base64, action: 'image-to-html',
@@ -91,8 +101,9 @@ export default function ChatPanel() {
       addMessage({ role: 'assistant', content: msg, isHtml: true })
       setTransformImage(null)
     } catch (e: any) {
+      if (e.name === 'AbortError') return
       addMessage({ role: 'assistant', content: `❌ ${e.message}`, isHtml: false })
-    } finally { setTransforming(false) }
+    } finally { abortRef.current = null; setTransforming(false) }
   }
 
   const send = async (overridePrompt?: string) => {
@@ -127,8 +138,9 @@ export default function ChatPanel() {
       const isBuildNew = /^(create|build|make|generate|design)\s/i.test(lower) && !hasImage
       const sendHtml = includeHtml && !isBuildNew
 
+      abortRef.current = new AbortController()
       const res = await fetch('/api/ai', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: abortRef.current.signal,
         body: JSON.stringify({
           provider: aiProvider, model: aiModel, apiKey: key,
           prompt: text, currentHtml: sendHtml ? html : undefined, includeHtml: sendHtml,
@@ -168,8 +180,9 @@ export default function ChatPanel() {
       }
       setAttachedImage(null)
     } catch (e: any) {
+      if (e.name === 'AbortError') return
       addMessage({ role: 'assistant', content: `❌ ${e.message}`, isHtml: false })
-    } finally { setIsGenerating(false) }
+    } finally { abortRef.current = null; setIsGenerating(false) }
   }
 
   const quickActions = [
@@ -245,10 +258,11 @@ export default function ChatPanel() {
             </div>
           </div>
         ))}
-        {isGenerating && (
+        {(isGenerating || transforming) && (
           <div className="flex justify-start">
             <div className="bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-400 flex items-center gap-2">
               <Loader2 size={12} className="animate-spin" /> Thinking...
+              <button onClick={cancel} className="ml-1 px-2 py-0.5 bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded text-[10px] border border-red-500/30">Cancel</button>
             </div>
           </div>
         )}
@@ -279,7 +293,7 @@ export default function ChatPanel() {
         <div className="flex items-center gap-1.5">
           <button onClick={() => transformImgRef.current?.click()}
             className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded border flex-1 transition-colors ${transformImage ? 'bg-emerald-600/20 border-emerald-500/50 text-emerald-300' : 'bg-zinc-800 hover:bg-zinc-700 border-zinc-600 text-zinc-400'}`}>
-            {transformImage ? <><img src={transformImage.preview} alt="" className="h-4 w-4 rounded object-cover" /><span className="truncate">{transformImage.name}</span></> : <><ImageIcon size={12} /> Upload target image</>}
+            {transformImage ? <><img src={transformImage.preview} alt="" className="h-4 w-4 rounded object-cover" /><span className="truncate">{transformImage.name}</span></> : <><ImageIcon size={12} /> Transform letter with image</>}
           </button>
           {transformImage && <button onClick={() => setTransformImage(null)} className="p-1 hover:bg-zinc-700 rounded text-zinc-500"><X size={11} /></button>}
           <button onClick={runTransform} disabled={!transformImage || transforming}
