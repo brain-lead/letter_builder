@@ -47,7 +47,7 @@ function parseVision(plan: string) {
       sections[key] = after.substring(0, end).trim()
     }
   }
-  return {
+  const result = {
     brand: sections['BRAND'] || '', headerColor: (sections['HEADER_COLOR'] || '').match(/#[0-9a-fA-F]{6}/)?.[0] || '',
     buttonColor: (sections['BUTTON_COLOR'] || '').match(/#[0-9a-fA-F]{6}/)?.[0] || '',
     bgColor: (sections['BG_COLOR'] || '').match(/#[0-9a-fA-F]{6}/)?.[0] || '',
